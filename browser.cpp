@@ -48,7 +48,8 @@ void register_server();
 
 // Listens to the server.
 // Keeps receiving and printing the messages from the server.
-void server_listener();
+void *server_listener(void *arg);
+
 
 // Starts the browser.
 // Sets up the connection, start the listener thread,
@@ -80,7 +81,16 @@ void read_user_input(char message[]) {
  */
 void load_cookie() {
     // TODO
-    session_id = -1;
+    FILE *file = fopen(COOKIE_PATH, "r");
+    if (file != NULL) {
+        fscanf(file, "%d", &session_id);
+        fclose(file);
+    } else {
+        session_id = -1;
+    }
+   
+   
+    
 }
 
 /**
@@ -89,6 +99,12 @@ void load_cookie() {
  */
 void save_cookie() {
     // TODO
+    FILE *file = fopen(COOKIE_PATH, "w");
+    if (file != NULL) {
+        fprintf(file, "%d", session_id);
+        fclose(file);
+    }
+  
 }
 
 /**
@@ -107,11 +123,15 @@ void register_server() {
  * Listens to the server; keeps receiving and printing the messages from the server in a while loop
  * if the browser is on.
  */
-void server_listener() {
-    char message[BUFFER_LEN];
-    receive_message(server_socket_fd, message);
-    puts(message);
+void *server_listener(void *arg) {
+    while (browser_on) {
+        char message[BUFFER_LEN];
+        receive_message(server_socket_fd, message);
+        puts(message);
+    }
+    return NULL;
 }
+
 
 /**
  * Starts the browser. Sets up the connection, start the listener thread,
@@ -150,18 +170,31 @@ void start_browser(const char host_ip[], int port) {
     // Saves the session ID to the cookie on the disk.
     save_cookie();
 
+    // Create a new thread to run server_listener()
+    pthread_t thread_id;
+    if (pthread_create(&thread_id, NULL, server_listener, NULL) != 0) {
+        perror("Failed to create thread for server_listener");
+        exit(EXIT_FAILURE);
+    }
+
+
     // Main loop to read in the user's input and send it out.
     while (browser_on) {
         char message[BUFFER_LEN];
         read_user_input(message);
         send_message(server_socket_fd, message);
-        server_listener();
     }
+
+    // Wait for the server_listener thread to finish before closing the socket
+    if (pthread_join(thread_id, NULL) != 0) {
+        perror("Failed to join server_listener thread");
+        exit(EXIT_FAILURE);
+     }
 
     // Closes the socket.
     close(server_socket_fd);
     printf("Closed the connection to %s:%d.\n", host_ip, port);
-}
+    }
 
 /**
  * The main function for the browser.
@@ -171,7 +204,7 @@ void start_browser(const char host_ip[], int port) {
  * @return exit code
  */
 int main(int argc, char *argv[]) {
-    char *host_ip = DEFAULT_HOST_IP;
+    const char *host_ip = DEFAULT_HOST_IP;
     int port = DEFAULT_PORT;
 
     if (argc == 1) {
