@@ -23,6 +23,15 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <netinet/in.h>
+#include <unordered_map>
+#include <random>  
+
+
+
+
+
+#define BUFFER_LEN 1024
+
 
 #define NUM_VARIABLES 26
 #define NUM_SESSIONS 128
@@ -43,9 +52,11 @@ typedef struct session_struct {
 } session_t;
 
 static browser_t browser_list[NUM_BROWSER];                             // Stores the information of all browsers.
-static session_t session_list[NUM_SESSIONS];                            // Stores the information of all sessions.
+static std::unordered_map<int, session_t> session_map;  // Stores the information of all sessions.
+// static session_t session_list[NUM_SESSIONS];                            // Stores the information of all sessions.
 static pthread_mutex_t browser_list_mutex = PTHREAD_MUTEX_INITIALIZER;  // A mutex lock for the browser list.
-static pthread_mutex_t session_list_mutex = PTHREAD_MUTEX_INITIALIZER;  // A mutex lock for the session list.
+static pthread_mutex_t session_map_mutex = PTHREAD_MUTEX_INITIALIZER;  // A mutex lock for the session list.
+
 
 // Returns the string format of the given session.
 // There will be always 9 digits in the output string.
@@ -96,22 +107,24 @@ void start_server(int port);
  */
 void session_to_str(int session_id, char result[]) {
     memset(result, 0, BUFFER_LEN);
-    session_t session = session_list[session_id];
+    if (session_map.find(session_id) == session_map.end()) {
+        return; // Session ID not found
+    }
+    session_t& session = session_map[session_id]; // Access the session by ID
 
     for (int i = 0; i < NUM_VARIABLES; ++i) {
         if (session.variables[i]) {
             char line[32];
-
             if (session.values[i] < 1000) {
-                sprintf(line, "%c = %.6f\n", 'a' + i, session.values[i]);
+                snprintf(line, sizeof(line), "%c = %.6f\n", 'a' + i, session.values[i]); // Using snprintf for safety
             } else {
-                sprintf(line, "%c = %.8e\n", 'a' + i, session.values[i]);
+                snprintf(line, sizeof(line), "%c = %.8e\n", 'a' + i, session.values[i]); // Using snprintf for safety
             }
-
             strcat(result, line);
         }
     }
 }
+
 
 /**
  * Determines if the given string represents a number.
@@ -119,24 +132,17 @@ void session_to_str(int session_id, char result[]) {
  * @param str the string to determine if it represents a number
  * @return a boolean that determines if the given string represents a number
  */
+
+
 bool is_str_numeric(const char str[]) {
-    if (str == NULL) {
+    if (str == NULL || str[0] == '\0' || 
+        !(isdigit(str[0]) || str[0] == '-' || str[0] == '.')) {
         return false;
     }
 
-    if (!(isdigit(str[0]) || (str[0] == '-') || (str[0] == '.'))) {
-        return false;
-    }
-
-    int i = 1;
-    while (str[i] != '\0') {
-        if (!(isdigit(str[i]) || str[i] == '.')) {
-            return false;
-        }
-        i++;
-    }
-
-    return true;
+    char* ptr;
+    strtod(str, &ptr);  // Convert string to double, ptr points to part not used in conversion
+    return *ptr == '\0';  // Check if the entire string was consumed
 }
 
 /**
@@ -147,68 +153,106 @@ bool is_str_numeric(const char str[]) {
  * @param message the message to be processed
  * @return a boolean that determines if the given message is valid
  */
+
+
+extern std::unordered_map<int, session_t> session_map; 
+
+
+/**
+ * Checks if a variable (identified by a single character) has been initialized.
+ */
+bool is_variable_initialized(int session_id, char variable) {
+    int idx = variable - 'a';
+    if (idx < 0 || idx >= NUM_VARIABLES) return false; // Check range
+    return session_map[session_id].variables[idx];
+}
+
+/**
+ * Process the given message and update the given session if it is valid.
+ */
+
+
+
 bool process_message(int session_id, const char message[]) {
-    char *token;
-    int result_idx;
-    double first_value;
-    char symbol;
-    double second_value;
-
-    // Makes a copy of the string since strtok() will modify the string that it is processing.
-    char data[BUFFER_LEN];
-    strcpy(data, message);
-
-    // Processes the result variable.
-    token = strtok(data, " ");
-    result_idx = token[0] - 'a';
-
-    // Processes "=".
-    token = strtok(NULL, " ");
-
-    // Processes the first variable/value.
-    token = strtok(NULL, " ");
-    if (is_str_numeric(token)) {
-        first_value = strtod(token, NULL);
-    } else {
-        int first_idx = token[0] - 'a';
-        first_value = session_list[session_id].values[first_idx];
+    if (session_map.find(session_id) == session_map.end()) {
+        return false;  // Session does not exist
     }
 
-    // Processes the operation symbol.
-    token = strtok(NULL, " ");
-    if (token == NULL) {
-        session_list[session_id].variables[result_idx] = true;
-        session_list[session_id].values[result_idx] = first_value;
+    char *token, *tokens[5];
+    int num_tokens = 0, result_idx;
+    double first_value, second_value;
+    char data[BUFFER_LEN], symbol;
+
+    strcpy(data, message);  // Makes a copy of the message.
+
+    // Tokenization of the input
+    token = strtok(data, " ");
+    while (token != NULL && num_tokens < 5) {
+        tokens[num_tokens++] = token;
+        token = strtok(NULL, " ");
+    }
+
+    // Validate format: Must have at least three tokens (var, "=", value)
+    if (num_tokens < 3 || strcmp(tokens[1], "=") != 0) return false;
+
+    if (!isalpha(tokens[0][0]) || strlen(tokens[0]) != 1) return false;  // Ensure variable is a single letter
+    result_idx = tokens[0][0] - 'a';
+
+    session_t& session = session_map[session_id]; // Get the session reference
+
+    // First value or variable handling
+    if (is_str_numeric(tokens[2])) {
+        first_value = strtod(tokens[2], NULL);
+    } else if (isalpha(tokens[2][0]) && strlen(tokens[2]) == 1 && is_variable_initialized(session_id, tokens[2][0])) {
+        first_value = session.values[tokens[2][0] - 'a'];
+    } else {
+        return false;  // First value is not numeric or an uninitialized variable
+    }
+
+    if (num_tokens == 3) {  // Simple assignment, no operation
+        session.variables[result_idx] = true;
+        session.values[result_idx] = first_value;
         return true;
     }
-    symbol = token[0];
 
-    // Processes the second variable/value.
-    token = strtok(NULL, " ");
-    if (is_str_numeric(token)) {
-        second_value = strtod(token, NULL);
+    // Operation handling
+    if (num_tokens != 5) return false;  // Complete expression must have exactly five tokens
+    symbol = tokens[3][0];
+    if (strchr("+-*/", symbol) == NULL) return false;  // Validate operation symbol
+
+    // Second value or variable handling
+    if (is_str_numeric(tokens[4])) {
+        second_value = strtod(tokens[4], NULL);
+    } else if (isalpha(tokens[4][0]) && strlen(tokens[4]) == 1 && is_variable_initialized(session_id, tokens[4][0])) {
+        second_value = session.values[tokens[4][0] - 'a'];
     } else {
-        int second_idx = token[0] - 'a';
-        second_value = session_list[session_id].values[second_idx];
+        return false;  // Second value is not numeric or an uninitialized variable
     }
 
-    // No data should be left over thereafter.
-    token = strtok(NULL, " ");
-
-    session_list[session_id].variables[result_idx] = true;
-
-    if (symbol == '+') {
-        session_list[session_id].values[result_idx] = first_value + second_value;
-    } else if (symbol == '-') {
-        session_list[session_id].values[result_idx] = first_value - second_value;
-    } else if (symbol == '*') {
-        session_list[session_id].values[result_idx] = first_value * second_value;
-    } else if (symbol == '/') {
-        session_list[session_id].values[result_idx] = first_value / second_value;
+    // Perform the operation
+    session.variables[result_idx] = true;
+    switch (symbol) {
+        case '+':
+            session.values[result_idx] = first_value + second_value;
+            break;
+        case '-':
+            session.values[result_idx] = first_value - second_value;
+            break;
+        case '*':
+            session.values[result_idx] = first_value * second_value;
+            break;
+        case '/':
+            if (second_value == 0) return false;  // Avoid division by zero
+            session.values[result_idx] = first_value / second_value;
+            break;
+        default:
+            return false;  // Unrecognized operation
     }
 
     return true;
 }
+
+
 
 /**
  * Broadcasts the given message to all browsers with the same session ID.
@@ -216,7 +260,20 @@ bool process_message(int session_id, const char message[]) {
  * @param session_id the session ID
  * @param message the message to be broadcasted
  */
+
+
+
 void broadcast(int session_id, const char message[]) {
+    // First check if the session_id exists in the session_map
+    pthread_mutex_lock(&session_map_mutex);  // Lock the session map mutex
+    bool session_exists = (session_map.find(session_id) != session_map.end());
+    pthread_mutex_unlock(&session_map_mutex);  // Unlock the mutex
+
+    if (!session_exists) {
+        return;  // If the session does not exist, do not proceed with broadcasting
+    }
+
+    // If the session exists, proceed to broadcast to all browsers in this session
     for (int i = 0; i < NUM_BROWSER; ++i) {
         if (browser_list[i].in_use && browser_list[i].session_id == session_id) {
             send_message(browser_list[i].socket_fd, message);
@@ -246,7 +303,7 @@ void load_all_sessions() {
         get_session_file_path(i, path);
         FILE *file = fopen(path, "r");
         if (file != NULL) {
-            fread(&session_list[i], sizeof(session_t), 1, file);
+            fread(&session_map[i], sizeof(session_t), 1, file);
             fclose(file);
         }
     }
@@ -264,7 +321,7 @@ void save_session(int session_id) {
     get_session_file_path(session_id, path);
     FILE *file = fopen(path, "w");
     if (file != NULL) {
-        fwrite(&session_list[session_id], sizeof(session_t), 1, file);
+        fwrite(&session_map[session_id], sizeof(session_t), 1, file);
         fclose(file);
     }
    
@@ -310,7 +367,7 @@ int register_browser(int browser_socket_fd) {
 
     return browser_id;
 }
-*/
+
 
 int register_browser(int browser_socket_fd) {
     int browser_id;
@@ -350,6 +407,56 @@ int register_browser(int browser_socket_fd) {
 
     return browser_id;
 }
+*/
+
+
+
+int register_browser(int browser_socket_fd) {
+    pthread_mutex_lock(&browser_list_mutex); // Locking the mutex before accessing browser_list
+    int browser_id = -1;
+    for (int i = 0; i < NUM_BROWSER; ++i) {
+        if (!browser_list[i].in_use) {
+            browser_id = i;
+            browser_list[browser_id].in_use = true;
+            browser_list[browser_id].socket_fd = browser_socket_fd;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&browser_list_mutex); // Unlocking the mutex after accessing browser_list
+
+    if (browser_id == -1) {
+        return -1; // No available browser slots
+    }
+
+    // Generate a unique session ID
+    std::random_device rd; // Obtain a random number from hardware
+    std::mt19937 eng(rd()); // Seed the generator
+    std::uniform_int_distribution<> distr(10000, 99999); // Define the range
+
+    int session_id = distr(eng);
+    pthread_mutex_lock(&session_map_mutex); // Lock the session map mutex
+    while (session_map.find(session_id) != session_map.end()) { // Ensure uniqueness
+        session_id = distr(eng);
+    }
+
+    // Create a new session and store it in the map
+    session_t new_session;
+    new_session.in_use = true;
+    memset(new_session.variables, 0, sizeof(new_session.variables));
+    memset(new_session.values, 0, sizeof(new_session.values));
+    session_map[session_id] = new_session;
+
+    pthread_mutex_unlock(&session_map_mutex); // Unlock the session map mutex
+
+    browser_list[browser_id].session_id = session_id;
+
+    // Send the session ID back to the browser
+    char message[BUFFER_LEN];
+    snprintf(message, sizeof(message), "%d", session_id); // Safer with snprintf
+    send_message(browser_list[browser_id].socket_fd, message);
+
+    return browser_id;
+}
 
 
 /**
@@ -359,56 +466,12 @@ int register_browser(int browser_socket_fd) {
  *
  * @param browser_socket_fd the socket file descriptor of the browser connected
  */
-// void browser_handler(int browser_socket_fd) {
-//     int browser_id;
-
-//     browser_id = register_browser(browser_socket_fd);
-
-//     int socket_fd = browser_list[browser_id].socket_fd;
-//     int session_id = browser_list[browser_id].session_id;
-
-//     printf("Successfully accepted Browser #%d for Session #%d.\n", browser_id, session_id);
-
-//     while (true) {
-//         char message[BUFFER_LEN];
-//         char response[BUFFER_LEN];
-
-//         receive_message(socket_fd, message);
-//         printf("Received message from Browser #%d for Session #%d: %s\n", browser_id, session_id, message);
-
-//         if ((strcmp(message, "EXIT") == 0) || (strcmp(message, "exit") == 0)) {
-//             close(socket_fd);
-//             pthread_mutex_lock(&browser_list_mutex);
-//             browser_list[browser_id].in_use = false;
-//             pthread_mutex_unlock(&browser_list_mutex);
-//             printf("Browser #%d exited.\n", browser_id);
-//             return;
-//         }
-
-//         if (message[0] == '\0') {
-//             continue;
-//         }
-
-//         bool data_valid = process_message(session_id, message);
-//         if (!data_valid) {
-//             // Send the error message to the browser.
-//             continue;
-//         }
-
-//         session_to_str(session_id, response);
-//         broadcast(session_id, response);
-
-//         save_session(session_id);
-//     }
-// }
-
-
 
 void* browser_handler(void* arg) {
     int browser_socket_fd = *((int*)arg); // Cast the argument back to int
+    free(arg);  // Free the argument right after using it
 
     int browser_id = register_browser(browser_socket_fd);
-
     int socket_fd = browser_list[browser_id].socket_fd;
     int session_id = browser_list[browser_id].session_id;
 
@@ -422,10 +485,10 @@ void* browser_handler(void* arg) {
         printf("Received message from Browser #%d for Session #%d: %s\n", browser_id, session_id, message);
 
         if ((strcmp(message, "EXIT") == 0) || (strcmp(message, "exit") == 0)) {
-            close(socket_fd);
             pthread_mutex_lock(&browser_list_mutex);
             browser_list[browser_id].in_use = false;
             pthread_mutex_unlock(&browser_list_mutex);
+            close(socket_fd);
             printf("Browser #%d exited.\n", browser_id);
             break; // Exit the thread
         }
@@ -436,17 +499,16 @@ void* browser_handler(void* arg) {
 
         bool data_valid = process_message(session_id, message);
         if (!data_valid) {
-            // Send the error message to the browser.
+            strcpy(response, "ERROR");
+            send_message(socket_fd, response); // Send error message to the browser
             continue;
         }
 
         session_to_str(session_id, response);
         broadcast(session_id, response);
-
         save_session(session_id);
     }
 
-    free(arg); // Free the memory allocated for the argument
     pthread_exit(NULL); // Exit the thread
 }
 
@@ -457,54 +519,7 @@ void* browser_handler(void* arg) {
  * @param port the port that the server is running on
  */
 
-/**
-void start_server(int port) {
-    // Loads every session if there exists one on the disk.
 
-    load_all_sessions();
-
-    // Creates the socket.
-    int server_socket_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (server_socket_fd == 0) {
-        perror("Socket creation failed");
-        exit(EXIT_FAILURE);
-    }
-
-    // Binds the socket.
-    struct sockaddr_in server_address;
-    server_address.sin_family = AF_INET;
-    server_address.sin_addr.s_addr = htonl(INADDR_ANY);
-    server_address.sin_port = htons(port);
-    if (bind(server_socket_fd, (struct sockaddr *) &server_address, sizeof(server_address)) < 0) {
-        perror("Socket bind failed");
-        exit(EXIT_FAILURE);
-    }
-
-    // Listens to the socket.
-    if (listen(server_socket_fd, SOMAXCONN) < 0) {
-        perror("Socket listen failed");
-        exit(EXIT_FAILURE);
-    }
-    printf("The server is now listening on port %d.\n", port);
-
-    // Main loop to accept new browsers and creates handlers for them.
-    while (true) {
-        struct sockaddr_in browser_address;
-        socklen_t browser_address_len = sizeof(browser_address);
-        int browser_socket_fd = accept(server_socket_fd, (struct sockaddr *) &browser_address, &browser_address_len);
-        if ((browser_socket_fd) < 0) {
-            perror("Socket accept failed");
-            continue;
-        }
-
-        // Starts the handler for the new browser.
-        browser_handler(browser_socket_fd);
-    }
-
-    // Closes the socket.
-    close(server_socket_fd);
-}
-*/
 
 void start_server(int port) {
     // Loads every session if there exists one on the disk.
