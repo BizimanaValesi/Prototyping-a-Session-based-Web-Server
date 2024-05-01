@@ -249,6 +249,8 @@ bool process_message(int session_id, const char message[]) {
             return false;  // Unrecognized operation
     }
 
+
+    save_session(session_id);  // Save changes to the session
     return true;
 }
 
@@ -334,10 +336,12 @@ void save_session(int session_id) {
  * @param browser_socket_fd the socket file descriptor of the browser connected
  * @return the ID for the browser
  */
-/**
-int register_browser(int browser_socket_fd) {
-    int browser_id;
 
+
+int register_browser(int browser_socket_fd) {
+    int browser_id = -1;
+
+    // Try to find an unused slot for the new browser
     for (int i = 0; i < NUM_BROWSER; ++i) {
         if (!browser_list[i].in_use) {
             browser_id = i;
@@ -347,117 +351,37 @@ int register_browser(int browser_socket_fd) {
         }
     }
 
+    // Handle case where no browser slot is available
+    if (browser_id == -1) {
+        return -1; // or handle error appropriately
+    }
+
     char message[BUFFER_LEN];
     receive_message(browser_socket_fd, message);
 
     int session_id = strtol(message, NULL, 10);
-    if (session_id == -1) {
-        for (int i = 0; i < NUM_SESSIONS; ++i) {
-            if (!session_list[i].in_use) {
-                session_id = i;
-                session_list[session_id].in_use = true;
-                break;
-            }
-        }
+    if (session_id == -1 || session_map.find(session_id) == session_map.end()) {
+        // Allocate a new session if the received ID is invalid or does not exist
+        // Generate a new unique session ID not already in the map
+        std::random_device rd;
+        std::mt19937 gen(rd());
+        std::uniform_int_distribution<> dist(10000, 99999); // Adjust range as needed
+
+        do {
+            session_id = dist(gen);
+        } while (session_map.find(session_id) != session_map.end());
+
+        // Initialize the new session
+        session_map[session_id] = {true}; // Assuming the structure has an `in_use` flag
     }
     browser_list[browser_id].session_id = session_id;
 
-    sprintf(message, "%d", session_id);
+    // Safely generate a message with the session ID
+    snprintf(message, BUFFER_LEN, "%d", session_id);
     send_message(browser_socket_fd, message);
 
     return browser_id;
 }
-
-
-int register_browser(int browser_socket_fd) {
-    int browser_id;
-
-    pthread_mutex_lock(&browser_list_mutex); // Locking the mutex before accessing browser_list
-    for (int i = 0; i < NUM_BROWSER; ++i) {
-        if (!browser_list[i].in_use) {
-            browser_id = i;
-            browser_list[browser_id].in_use = true;
-            browser_list[browser_id].socket_fd = browser_socket_fd;
-            break;
-        }
-    }
-    pthread_mutex_unlock(&browser_list_mutex); // Unlocking the mutex after accessing browser_list
-
-    char message[BUFFER_LEN];
-    receive_message(browser_socket_fd, message);
-
-    int session_id = strtol(message, NULL, 10);
-    if (session_id == -1) {
-        pthread_mutex_lock(&session_list_mutex); // Locking the mutex before accessing session_list
-        for (int i = 0; i < NUM_SESSIONS; ++i) {
-            if (!session_list[i].in_use) {
-                session_id = i;
-                session_list[session_id].in_use = true;
-                break;
-            }
-        }
-        pthread_mutex_unlock(&session_list_mutex); // Unlocking  the mutex after accessing session_list
-    }
-    browser_list[browser_id].session_id = session_id;
-
-    sprintf(message, "%d", session_id);
-    pthread_mutex_lock(&browser_list_mutex); // Locking the mutex before accessing browser_list
-    send_message(browser_list[browser_id].socket_fd, message);
-    pthread_mutex_unlock(&browser_list_mutex); // Unlocking the mutex after accessing browser_list
-
-    return browser_id;
-}
-*/
-
-
-
-int register_browser(int browser_socket_fd) {
-    pthread_mutex_lock(&browser_list_mutex); // Locking the mutex before accessing browser_list
-    int browser_id = -1;
-    for (int i = 0; i < NUM_BROWSER; ++i) {
-        if (!browser_list[i].in_use) {
-            browser_id = i;
-            browser_list[browser_id].in_use = true;
-            browser_list[browser_id].socket_fd = browser_socket_fd;
-            break;
-        }
-    }
-    pthread_mutex_unlock(&browser_list_mutex); // Unlocking the mutex after accessing browser_list
-
-    if (browser_id == -1) {
-        return -1; // No available browser slots
-    }
-
-    // Generate a unique session ID
-    std::random_device rd; // Obtain a random number from hardware
-    std::mt19937 eng(rd()); // Seed the generator
-    std::uniform_int_distribution<> distr(10000, 99999); // Define the range
-
-    int session_id = distr(eng);
-    pthread_mutex_lock(&session_map_mutex); // Lock the session map mutex
-    while (session_map.find(session_id) != session_map.end()) { // Ensure uniqueness
-        session_id = distr(eng);
-    }
-
-    // Create a new session and store it in the map
-    session_t new_session;
-    new_session.in_use = true;
-    memset(new_session.variables, 0, sizeof(new_session.variables));
-    memset(new_session.values, 0, sizeof(new_session.values));
-    session_map[session_id] = new_session;
-
-    pthread_mutex_unlock(&session_map_mutex); // Unlock the session map mutex
-
-    browser_list[browser_id].session_id = session_id;
-
-    // Send the session ID back to the browser
-    char message[BUFFER_LEN];
-    snprintf(message, sizeof(message), "%d", session_id); // Safer with snprintf
-    send_message(browser_list[browser_id].socket_fd, message);
-
-    return browser_id;
-}
-
 
 /**
  * Handles the given browser by listening to it, processing the message received,

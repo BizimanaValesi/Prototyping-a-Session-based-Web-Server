@@ -74,38 +74,44 @@ void read_user_input(char message[]) {
     }
 }
 
-/**
- * Loads the cookie from the disk and gets the session ID if there exists one.
- * Otherwise, assigns the session ID to be -1.
- * The file path of the cookie is stored in COOKIE_PATH.
- */
+
+
+
 void load_cookie() {
-    // TODO
     FILE *file = fopen(COOKIE_PATH, "r");
     if (file != NULL) {
-        fscanf(file, "%d", &session_id);
+        // Reading the session ID from the cookie file
+        if (fscanf(file, "%d", &session_id) != 1) {
+            fprintf(stderr, "Failed to read session ID from cookie file: %s\n", COOKIE_PATH);
+            session_id = -1;  // Set to a default value indicating no session
+        }
         fclose(file);
     } else {
-        session_id = -1;
+        fprintf(stderr, "Unable to open cookie file for reading: %s\n", COOKIE_PATH);
+        session_id = -1;  // Set to a default value indicating no session
     }
-   
-   
-    
 }
+
 
 /**
  * Saves the session ID to the cookie on the disk.
  * The file path of the cookie is stored in COOKIE_PATH.
  */
+
+
 void save_cookie() {
-    // TODO
     FILE *file = fopen(COOKIE_PATH, "w");
     if (file != NULL) {
-        fprintf(file, "%d", session_id);
+        // Writing the session ID to the cookie file
+        if (fprintf(file, "%d", session_id) < 0) {
+            fprintf(stderr, "Failed to write to cookie file: %s\n", COOKIE_PATH);
+        }
         fclose(file);
+    } else {
+        fprintf(stderr, "Unable to open cookie file for writing: %s\n", COOKIE_PATH);
     }
-  
 }
+
 
 /**
  * Interacts with the server to get or confirm the final session ID.
